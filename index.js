@@ -1,131 +1,255 @@
 const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes } = require('discord.js');
 const express = require('express');
-const mongoose = require('mongoose');
 const app = express();
+const https = require('https');
+const fs = require('fs');
+const path = require('path');
 
-// ===== CẤU HÌNH (THAY THÔNG TIN CỦA ÔNG VÀO ĐÂY) =====
-const OWNER_ID = "1486380909736366120"; 
-const TOKEN = process.env['TOKEN'];
-const MONGO_URI = "mongodb+srv://VexzhubAdminByQuochoa:Quochoa2382012@cluster0.lk2gk5w.mongodb.net/?appName=Cluster0";
+// Mở port cho Render không bị sập (Render dùng port động qua process.env.PORT)
+const PORT = process.env.PORT || 3000;
+app.get('/', (req, res) => res.send('Vexz Hub Bot is online 24/7!'));
+app.listen(PORT, () => console.log(`💻 Web server đang chạy trên port ${PORT}`));
 
-// ===== KẾT NỐI DATABASE =====
-mongoose.connect(MONGO_URI)
-    .then(() => console.log("✅ Đã thông suốt với MongoDB Atlas!"))
-    .catch(err => console.error("❌ Lỗi MongoDB:", err));
+// ===== CONFIG =====
+const OWNER_ID = "1486380909736366120"; // ← ÔNG ĐỔI ID DISCORD CỦA ÔNG VÀO ĐÂY
+const TOKEN = process.env.TOKEN; // Đã sửa thành TOKEN viết hoa theo Render
 
-const KeySchema = new mongoose.Schema({
-    keyText: String,
-    userId: String,
-    username: String,
-    hwid: { type: String, default: "" },
-    ip: { type: String, default: "" },
-    expiresAt: Date,
-    createdAt: { type: Date, default: Date.now }
-});
-const Key = mongoose.model('VexzKeys', KeySchema);
+// ===== DATABASE =====
+// Sửa đường dẫn lưu file vào thư mục tạm hoặc thư mục gốc của Render bám theo dự án
+const DB_PATH = path.join(__dirname, 'database.json');
+let database = { keys: {}, whitelist: [] };
 
-// ===== WEB API CHO ROBLOX CHECK KEY =====
-app.get('/', (req, res) => res.send('Vexz Hub System is Online!'));
-
-app.get('/verify', async (req, res) => {
-    const { key, hwid } = req.query;
-    const userIP = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-
-    const data = await Key.findOne({ keyText: key });
-
-    if (!data) return res.send("invalid"); // Key không tồn tại
-    if (new Date() > data.expiresAt) return res.send("expired"); // Hết hạn
-
-    // Quản lý HWID
-    if (data.hwid === "") {
-        data.hwid = hwid;
-        data.ip = userIP;
-        await data.save();
-        return res.send("success");
+try {
+    if (fs.existsSync(DB_PATH)) {
+        database = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+        console.log(`✅ Loaded thành công: ${Object.keys(database.keys).length} keys từ database.`);
     }
+} catch(e) {
+    console.log("⚠️ Không thể đọc file database, đang khởi tạo mới.");
+}
 
-    if (data.hwid === hwid) {
-        data.ip = userIP; // Cập nhật IP mới nhất
-        await data.save();
-        return res.send("success");
-    } else {
-        return res.send("wrong_hwid"); // Sai mã máy
+function saveDatabase() {
+    try {
+        fs.writeFileSync(DB_PATH, JSON.stringify(database, null, 2));
+    } catch (e) {
+        console.log("⚠️ Lỗi lưu file database:", e.message);
     }
-});
+}
+setInterval(saveDatabase, 30000);
 
-app.listen(3000, () => console.log("🌐 Web API đang chạy tại Port 3000"));
+// ===== TẠO KEY NGẪU NHIÊN DÍNH LIỀN =====
+function generateKey() {
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let key = "";
+    for (let i = 0; i < 25 + Math.floor(Math.random() * 11); i++) {
+        key += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return key;
+}
 
 // ===== BOT DISCORD =====
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
+const client = new Client({
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+});
 
-const commands = [
-    new SlashCommandBuilder().setName('genkey').setDescription('Tạo key mới (Admin)')
-        .addIntegerOption(opt => opt.setName('days').setDescription('Số ngày').setRequired(true)),
-    new SlashCommandBuilder().setName('redeem').setDescription('Nhập key để kích hoạt')
-        .addStringOption(opt => opt.setName('key').setDescription('Nhập mã key').setRequired(true)),
-    new SlashCommandBuilder().setName('check').setDescription('Kiểm tra thông tin key')
-        .addStringOption(opt => opt.setName('key').setDescription('Key cần check').setRequired(true)),
+const slashCommands = [
+    new SlashCommandBuilder().setName('help').setDescription('📋 Danh sách lệnh'),
+    new SlashCommandBuilder().setName('ping').setDescription('🏓 Check ping'),
+    new SlashCommandBuilder().setName('genkey').setDescription('🔑 Admin tạo key').addIntegerOption(o => o.setName('ngay').setDescription('Số ngày').setRequired(true)),
+    new SlashCommandBuilder().setName('redeem').setDescription('🎫 Nhập key').addStringOption(o => o.setName('key').setDescription('Key').setRequired(true)),
+    new SlashCommandBuilder().setName('script').setDescription('📜 Lấy script').addStringOption(o => o.setName('key').setDescription('Key (để trống nếu đã WL)').setRequired(false)),
+    new SlashCommandBuilder().setName('whitelist').setDescription('✅ Whitelist user').addUserOption(o => o.setName('user').setDescription('User').setRequired(true)),
+    new SlashCommandBuilder().setName('unwhitelist').setDescription('❌ Gỡ whitelist').addUserOption(o => o.setName('user').setDescription('User').setRequired(true)),
+    new SlashCommandBuilder().setName('mykey').setDescription('🔍 Kiểm tra key'),
+    new SlashCommandBuilder().setName('listkeys').setDescription('📜 Danh sách key'),
+    new SlashCommandBuilder().setName('deletekey').setDescription('🗑️ Xóa key').addStringOption(o => o.setName('key').setDescription('Key').setRequired(true)),
 ];
 
 client.on('ready', async () => {
-    const rest = new REST({ version: '10' }).setToken(TOKEN);
-    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-    console.log(`🤖 Bot ${client.user.tag} đã sẵn sàng!`);
+    console.log(`✅ ${client.user.tag} đã online thành công trên Render!`);
+    client.user.setActivity('/help | Vexz Hub 24/7', { type: 3 }); // Kiểu hiển thị WATCHING
+
+    try {
+        const rest = new REST({ version: '10' }).setToken(TOKEN);
+        await rest.put(Routes.applicationCommands(client.user.id), { body: slashCommands });
+        console.log('✅ Đã đăng ký thành công Slash Commands hệ thống!');
+    } catch (error) {
+        console.error('⚠️ Lỗi đăng ký lệnh slash:', error);
+    }
 });
 
-client.on('interactionCreate', async (inter) => {
-    if (!inter.isChatInputCommand()) return;
+client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isChatInputCommand()) return;
 
-    if (inter.commandName === 'genkey') {
-        if (inter.user.id !== OWNER_ID) return inter.reply({ content: "❌ Cút! Bạn không phải Admin.", ephemeral: true });
+    const { commandName, user } = interaction;
+    const userId = user.id;
+    const userName = user.username;
+
+    // ===== /help (CÔNG KHAI) =====
+    if (commandName === 'help') {
+        const embed = new EmbedBuilder()
+            .setTitle("🤖 VEXZ HUB - WHITELIST BOT")
+            .setColor(0x00ff00)
+            .addFields(
+                { name: "🔹 /genkey <ngày>", value: "Admin tạo key mới" },
+                { name: "🔹 /redeem <key>", value: "Nhập key để kích hoạt whitelist" },
+                { name: "🔹 /script [key]", value: "Lấy đoạn mã script chạy trong game" },
+                { name: "🔹 /mykey", value: "Kiểm tra thông tin key cá nhân" },
+                { name: "🔹 /ping", value: "Kiểm tra trạng thái phản hồi của Bot" }
+            )
+            .setFooter({ text: "🟢 Hệ thống tự động hoạt động 24/7" });
+        await interaction.reply({ embeds: [embed] });
+    }
+
+    // ===== /ping (CÔNG KHAI) =====
+    if (commandName === 'ping') {
+        const u = process.uptime();
+        await interaction.reply(`🏓 **${client.ws.ping}ms** | Thời gian chạy liên tục: ${Math.floor(u/3600)}h ${Math.floor(u%3600/60)}m`);
+    }
+
+    // ===== /genkey (ADMIN ONLY - ẨN DANH) =====
+    if (commandName === 'genkey') {
+        if (userId !== OWNER_ID) return interaction.reply({ content: "❌ Ông không có quyền sử dụng lệnh của Admin!", ephemeral: true });
         
-        const days = inter.options.getInteger('days');
-        const keyGenerated = "VEXZ-" + Math.random().toString(36).substring(2, 12).toUpperCase();
-        const expiryDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
-
-        await Key.create({ keyText: keyGenerated, expiresAt: expiryDate });
-
+        const days = interaction.options.getInteger('ngay');
+        const newKey = generateKey();
+        database.keys[newKey] = {
+            expiry: new Date(Date.now() + days * 86400000).toISOString(),
+            username: null, 
+            userId: null,
+            createdAt: new Date().toISOString()
+        };
+        saveDatabase();
+        
         const embed = new EmbedBuilder()
             .setTitle("✅ TẠO KEY THÀNH CÔNG")
-            .setColor(0x00FF00)
+            .setColor(0x00ff00)
             .addFields(
-                { name: "🔑 Key", value: `\`${keyGenerated}\`` },
-                { name: "⏳ Hạn dùng", value: `${days} ngày` },
-                { name: "📅 Hết hạn", value: expiryDate.toLocaleDateString("vi-VN") }
+                { name: "🔑 Mã Key (Nhấp để copy)", value: `\`${newKey}\`` },
+                { name: "📅 Thời hạn sử dụng", value: `${days} ngày` }
             );
-        return inter.reply({ embeds: [embed] });
+        await interaction.reply({ embeds: [embed], ephemeral: true });
     }
 
-    if (inter.commandName === 'redeem') {
-        const keyInput = inter.options.getString('key');
-        const found = await Key.findOne({ keyText: keyInput });
-
-        if (!found) return inter.reply({ content: "❌ Key này không tồn tại!", ephemeral: true });
-        if (found.userId) return inter.reply({ content: "❌ Key này đã có người dùng rồi!", ephemeral: true });
-
-        found.userId = inter.user.id;
-        found.username = inter.user.username;
-        await found.save();
-
-        return inter.reply({ content: `✅ Chúc mừng **${inter.user.username}**! Bạn đã kích hoạt thành công Vexz Hub.`, ephemeral: true });
+    // ===== /redeem (ẨN DANH) =====
+    if (commandName === 'redeem') {
+        const key = interaction.options.getString('key');
+        
+        if (database.whitelist.includes(userId)) {
+            return interaction.reply({ content: "❌ Ông đã nằm trong danh sách Whitelist từ trước rồi!", ephemeral: true });
+        }
+        if (!database.keys[key]) {
+            return interaction.reply({ content: "❌ Mã Key này không tồn tại hoặc đã bị xóa khỏi hệ thống!", ephemeral: true });
+        }
+        if (new Date() > new Date(database.keys[key].expiry)) {
+            delete database.keys[key]; saveDatabase();
+            return interaction.reply({ content: "❌ Key này đã hết hạn sử dụng!", ephemeral: true });
+        }
+        if (database.keys[key].userId && database.keys[key].userId !== userId) {
+            return interaction.reply({ content: "❌ Key này đã được kích hoạt bởi một tài khoản khác!", ephemeral: true });
+        }
+        
+        database.keys[key].username = userName;
+        database.keys[key].userId = userId;
+        database.whitelist.push(userId);
+        saveDatabase();
+        
+        await interaction.reply({ content: "✅ **Kích hoạt thành công!** Hãy dùng lệnh `/script` để lấy mã chạy game nha.", ephemeral: true });
     }
 
-    if (inter.commandName === 'check') {
-        const keyInput = inter.options.getString('key');
-        const found = await Key.findOne({ keyText: keyInput });
+    // ===== /script (ẨN DANH) =====
+    if (commandName === 'script') {
+        let userKey = interaction.options.getString('key');
+        
+        if (!userKey) {
+            if (!database.whitelist.includes(userId)) {
+                return interaction.reply({ content: "❌ Ông chưa được Whitelist! Hãy dùng lệnh `/redeem` trước.", ephemeral: true });
+            }
+            for (const [k, v] of Object.entries(database.keys)) {
+                if (v.userId === userId) { userKey = k; break; }
+            }
+        }
+        
+        if (!database.keys[userKey]) return interaction.reply({ content: "❌ Không tìm thấy Key tương ứng với tài khoản!", ephemeral: true });
+        if (new Date() > new Date(database.keys[userKey].expiry)) {
+            delete database.keys[userKey]; saveDatabase();
+            return interaction.reply({ content: "❌ Key liên kết với tài khoản này đã hết hạn!", ephemeral: true });
+        }
+        
+        // Đoạn script chính của Vexz Hub
+        const script = `repeat wait() until game:IsLoaded() and game.Players.LocalPlayer\ngetgenv().Key = "${userKey}"\nloadstring(game:HttpGet("https://raw.githubusercontent.com/phamquochoa1942-png/DevVexzHub/refs/heads/main/VexzHub"))()`;
+        
+        await interaction.reply({
+            content: `📜 **Mã Script Vexz Hub của ông:**\n\`\`\`lua\n${script}\n\`\`\``,
+            ephemeral: true
+        });
+    }
 
-        if (!found) return inter.reply({ content: "❌ Không tìm thấy thông tin.", ephemeral: true });
+    // ===== /whitelist (ADMIN ONLY) =====
+    if (commandName === 'whitelist') {
+        if (userId !== OWNER_ID) return interaction.reply({ content: "❌ Quyền lực từ chối!", ephemeral: true });
+        const target = interaction.options.getUser('user');
+        if (database.whitelist.includes(target.id)) return interaction.reply({ content: "⚠️ Người chơi này đã có trong Whitelist rồi!", ephemeral: true });
+        
+        database.whitelist.push(target.id); saveDatabase();
+        await interaction.reply({ content: `✅ Đã cấp Whitelist trực tiếp cho thành viên **${target.username}**`, ephemeral: true });
+    }
 
-        const embed = new EmbedBuilder()
-            .setTitle("🔍 THÔNG TIN KEY")
-            .addFields(
-                { name: "Người dùng", value: found.username || "Chưa có" },
-                { name: "HWID", value: `\`${found.hwid || "Trống"}\`` },
-                { name: "IP mới nhất", value: `\`${found.ip || "Trống"}\`` },
-                { name: "Hạn dùng", value: found.expiresAt.toLocaleDateString("vi-VN") }
-            );
-        return inter.reply({ embeds: [embed], ephemeral: true });
+    // ===== /unwhitelist (ADMIN ONLY) =====
+    if (commandName === 'unwhitelist') {
+        if (userId !== OWNER_ID) return interaction.reply({ content: "❌ Quyền lực từ chối!", ephemeral: true });
+        const target = interaction.options.getUser('user');
+        const idx = database.whitelist.indexOf(target.id);
+        if (idx === -1) return interaction.reply({ content: "⚠️ Thành viên này không nằm trong danh sách Whitelist!", ephemeral: true });
+        
+        database.whitelist.splice(idx, 1);
+        for (const [k, v] of Object.entries(database.keys)) {
+            if (v.userId === target.id) delete database.keys[k];
+        }
+        saveDatabase();
+        await interaction.reply({ content: `✅ Đã gỡ Whitelist và hủy bỏ toàn bộ Key của thành viên **${target.username}**`, ephemeral: true });
+    }
+
+    // ===== /mykey (ẨN DANH) =====
+    if (commandName === 'mykey') {
+        if (!database.whitelist.includes(userId)) return interaction.reply({ content: "❌ Ông chưa kích hoạt Whitelist nên không có dữ liệu Key!", ephemeral: true });
+        let found = null;
+        for (const [k, v] of Object.entries(database.keys)) {
+            if (v.userId === userId) { found = { key: k, ...v }; break; }
+        }
+        if (found) {
+            await interaction.reply({
+                content: `🔑 **Thông tin Key của ông:**\n• Mã Key: \`${found.key}\`\n• Hạn dùng đến: ${new Date(found.expiry).toLocaleDateString("vi-VN")}`,
+                ephemeral: true
+            });
+        } else {
+            await interaction.reply({ content: "⚠️ Tài khoản được WL trực tiếp bằng lệnh Admin nên không đi kèm mã Key.", ephemeral: true });
+        }
+    }
+
+    // ===== /listkeys (ADMIN ONLY - ẨN DANH) =====
+    if (commandName === 'listkeys') {
+        if (userId !== OWNER_ID) return interaction.reply({ content: "❌ Quyền lực từ chối!", ephemeral: true });
+        const list = Object.entries(database.keys).slice(0, 25).map(([k, v]) => 
+            `\`${k.slice(0,12)}...\` | Người dùng: ${v.username || 'Chưa dùng'} | Hạn: ${new Date(v.expiry).toLocaleDateString("vi-VN")}`
+        ).join('\n') || 'Hệ thống hiện tại chưa có mã Key nào.';
+        await interaction.reply({ content: `📜 **Danh sách 25 Key gần nhất:**\n${list}`, ephemeral: true });
+    }
+
+    // ===== /deletekey (ADMIN ONLY - ẨN DANH) =====
+    if (commandName === 'deletekey') {
+        if (userId !== OWNER_ID) return interaction.reply({ content: "❌ Quyền lực từ chối!", ephemeral: true });
+        const key = interaction.options.getString('key');
+        if (!database.keys[key]) return interaction.reply({ content: "❌ Không tìm thấy mã Key này trên hệ thống!", ephemeral: true });
+        
+        if (database.keys[key].userId) {
+            const idx = database.whitelist.indexOf(database.keys[key].userId);
+            if (idx !== -1) database.whitelist.splice(idx, 1);
+        }
+        delete database.keys[key]; saveDatabase();
+        await interaction.reply({ content: `✅ Đã xóa bỏ hoàn toàn mã Key \`${key}\` ra khỏi hệ thống.`, ephemeral: true });
     }
 });
 
 client.login(TOKEN);
+ 
