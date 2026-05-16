@@ -9,7 +9,7 @@ app.get('/', (req, res) => res.send('Vexz Hub Bot MongoDB is online 24/7!'));
 app.listen(PORT, () => console.log(`💻 Web server đang chạy trên port ${PORT}`));
 
 // ===== CONFIG =====
-const OWNER_ID = "123456789"; // ← THAY ID DISCORD CỦA ÔNG VÀO ĐÂY
+const OWNER_ID = "1486380909736366120"; // ← THAY ID DISCORD CỦA ÔNG VÀO ĐÂY
 const TOKEN = process.env.TOKEN;
 const MONGO_URI = process.env.MONGO_URI; // Lấy link MongoDB từ bảng Env Render
 
@@ -106,7 +106,7 @@ client.on('interactionCreate', async (interaction) => {
 
     // ===== /genkey (ADMIN ONLY - ẨN DANH) =====
     if (commandName === 'genkey') {
-        if (userId !== OWNER_ID) return interaction.reply({ content: "❌ Ông không có quyền sử dụng lệnh của Admin!", ephemeral: true });
+        if (userId !== OWNER_ID) return interaction.reply({ content: "❌  không có quyền sử dụng lệnh", ephemeral: true });
         
         const days = interaction.options.getInteger('ngay');
         const newKey = generateKey();
@@ -138,7 +138,7 @@ client.on('interactionCreate', async (interaction) => {
         // Kiểm tra whitelist trên DB
         const isWhitelisted = await WhitelistModel.findById(userId);
         if (isWhitelisted) {
-            return interaction.reply({ content: "❌ Ông đã nằm trong danh sách Whitelist từ trước rồi!", ephemeral: true });
+            return interaction.reply({ content: "❌ bạn đã nằm trong danh sách Whitelist từ trước rồi!", ephemeral: true });
         }
 
         // Tìm key trên DB
@@ -171,7 +171,7 @@ client.on('interactionCreate', async (interaction) => {
         if (!userKey) {
             const isWhitelisted = await WhitelistModel.findById(userId);
             if (!isWhitelisted) {
-                return interaction.reply({ content: "❌ Ông chưa được Whitelist! Hãy dùng lệnh `/redeem` trước.", ephemeral: true });
+                return interaction.reply({ content: "❌ bạn chưa được Whitelist! Hãy dùng lệnh `/redeem` trước.", ephemeral: true });
             }
             const foundKey = await KeyModel.findOne({ userId: userId });
             if (foundKey) userKey = foundKey._id;
@@ -221,7 +221,7 @@ client.on('interactionCreate', async (interaction) => {
     // ===== /mykey (ẨN DANH) =====
     if (commandName === 'mykey') {
         const isWhitelisted = await WhitelistModel.findById(userId);
-        if (!isWhitelisted) return interaction.reply({ content: "❌ Ông chưa kích hoạt Whitelist nên không có dữ liệu Key!", ephemeral: true });
+        if (!isWhitelisted) return interaction.reply({ content: "❌ bạn chưa kích hoạt Whitelist nên không có dữ liệu Key!", ephemeral: true });
         
         const found = await KeyModel.findOne({ userId: userId });
         if (found) {
