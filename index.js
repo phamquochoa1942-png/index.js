@@ -1,41 +1,38 @@
 const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes } = require('discord.js');
 const express = require('express');
 const app = express();
-const https = require('https');
-const fs = require('fs');
-const path = require('path');
+const mongoose = require('mongoose'); // Thêm mongoose để kết nối database
 
-// Mở port cho Render không bị sập (Render dùng port động qua process.env.PORT)
+// Mở port cho Render
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Vexz Hub Bot is online 24/7!'));
+app.get('/', (req, res) => res.send('Vexz Hub Bot MongoDB is online 24/7!'));
 app.listen(PORT, () => console.log(`💻 Web server đang chạy trên port ${PORT}`));
 
 // ===== CONFIG =====
-const OWNER_ID = "1486380909736366120"; // ← ÔNG ĐỔI ID DISCORD CỦA ÔNG VÀO ĐÂY
-const TOKEN = process.env.TOKEN; // Đã sửa thành TOKEN viết hoa theo Render
+const OWNER_ID = "123456789"; // ← THAY ID DISCORD CỦA ÔNG VÀO ĐÂY
+const TOKEN = process.env.TOKEN;
+const MONGO_URI = process.env.MONGO_URI; // Lấy link MongoDB từ bảng Env Render
 
-// ===== DATABASE =====
-// Sửa đường dẫn lưu file vào thư mục tạm hoặc thư mục gốc của Render bám theo dự án
-const DB_PATH = path.join(__dirname, 'database.json');
-let database = { keys: {}, whitelist: [] };
+// ===== KẾT NỐI MONGODB ATLAS =====
+mongoose.connect(MONGO_URI)
+    .then(() => console.log('✅ Đã thông suốt với MongoDB Atlas vĩnh viễn!'))
+    .catch(err => console.error('❌ Lỗi kết nối MongoDB:', err.message));
 
-try {
-    if (fs.existsSync(DB_PATH)) {
-        database = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-        console.log(`✅ Loaded thành công: ${Object.keys(database.keys).length} keys từ database.`);
-    }
-} catch(e) {
-    console.log("⚠️ Không thể đọc file database, đang khởi tạo mới.");
-}
+// ===== ĐỊNH NGHĨA KHUNG DỮ LIỆU (SCHEMAS) =====
+// Bảng lưu thông tin Key và Whitelist dính liền
+const KeySchema = new mongoose.Schema({
+    _id: String, // Đây chính là mã Key luôn
+    expiry: String,
+    username: String,
+    userId: String,
+    createdAt: String
+});
+const KeyModel = mongoose.model('Key', KeySchema, 'keys'); // Lưu vào bảng 'keys' giống database cũ của ông
 
-function saveDatabase() {
-    try {
-        fs.writeFileSync(DB_PATH, JSON.stringify(database, null, 2));
-    } catch (e) {
-        console.log("⚠️ Lỗi lưu file database:", e.message);
-    }
-}
-setInterval(saveDatabase, 30000);
+const WhitelistSchema = new mongoose.Schema({
+    _id: String // Lưu trữ userId đã được whitelist
+});
+const WhitelistModel = mongoose.model('Whitelist', WhitelistSchema, 'whitelists');
 
 // ===== TẠO KEY NGẪU NHIÊN DÍNH LIỀN =====
 function generateKey() {
@@ -67,7 +64,7 @@ const slashCommands = [
 
 client.on('ready', async () => {
     console.log(`✅ ${client.user.tag} đã online thành công trên Render!`);
-    client.user.setActivity('/help | Vexz Hub 24/7', { type: 3 }); // Kiểu hiển thị WATCHING
+    client.user.setActivity('/help | Vexz Hub 24/7', { type: 3 });
 
     try {
         const rest = new REST({ version: '10' }).setToken(TOKEN);
@@ -97,7 +94,7 @@ client.on('interactionCreate', async (interaction) => {
                 { name: "🔹 /mykey", value: "Kiểm tra thông tin key cá nhân" },
                 { name: "🔹 /ping", value: "Kiểm tra trạng thái phản hồi của Bot" }
             )
-            .setFooter({ text: "🟢 Hệ thống tự động hoạt động 24/7" });
+            .setFooter({ text: "🟢 Hệ thống tự động lưu trữ vĩnh viễn trên MongoDB" });
         await interaction.reply({ embeds: [embed] });
     }
 
@@ -113,16 +110,19 @@ client.on('interactionCreate', async (interaction) => {
         
         const days = interaction.options.getInteger('ngay');
         const newKey = generateKey();
-        database.keys[newKey] = {
-            expiry: new Date(Date.now() + days * 86400000).toISOString(),
-            username: null, 
+        const expiryDate = new Date(Date.now() + days * 86400000).toISOString();
+        
+        // Lưu trực tiếp vào MongoDB
+        await KeyModel.create({
+            _id: newKey,
+            expiry: expiryDate,
+            username: null,
             userId: null,
             createdAt: new Date().toISOString()
-        };
-        saveDatabase();
+        });
         
         const embed = new EmbedBuilder()
-            .setTitle("✅ TẠO KEY THÀNH CÔNG")
+            .setTitle("✅ TẠO KEY THÀNH CÔNG (ĐÃ LƯU DATABASE)")
             .setColor(0x00ff00)
             .addFields(
                 { name: "🔑 Mã Key (Nhấp để copy)", value: `\`${newKey}\`` },
@@ -135,24 +135,31 @@ client.on('interactionCreate', async (interaction) => {
     if (commandName === 'redeem') {
         const key = interaction.options.getString('key');
         
-        if (database.whitelist.includes(userId)) {
+        // Kiểm tra whitelist trên DB
+        const isWhitelisted = await WhitelistModel.findById(userId);
+        if (isWhitelisted) {
             return interaction.reply({ content: "❌ Ông đã nằm trong danh sách Whitelist từ trước rồi!", ephemeral: true });
         }
-        if (!database.keys[key]) {
+
+        // Tìm key trên DB
+        const keyData = await KeyModel.findById(key);
+        if (!keyData) {
             return interaction.reply({ content: "❌ Mã Key này không tồn tại hoặc đã bị xóa khỏi hệ thống!", ephemeral: true });
         }
-        if (new Date() > new Date(database.keys[key].expiry)) {
-            delete database.keys[key]; saveDatabase();
+        if (new Date() > new Date(keyData.expiry)) {
+            await KeyModel.findByIdAndDelete(key);
             return interaction.reply({ content: "❌ Key này đã hết hạn sử dụng!", ephemeral: true });
         }
-        if (database.keys[key].userId && database.keys[key].userId !== userId) {
+        if (keyData.userId && keyData.userId !== userId) {
             return interaction.reply({ content: "❌ Key này đã được kích hoạt bởi một tài khoản khác!", ephemeral: true });
         }
         
-        database.keys[key].username = userName;
-        database.keys[key].userId = userId;
-        database.whitelist.push(userId);
-        saveDatabase();
+        // Cập nhật trạng thái Key và thêm vào Whitelist DB
+        keyData.username = userName;
+        keyData.userId = userId;
+        await keyData.save();
+
+        await WhitelistModel.create({ _id: userId });
         
         await interaction.reply({ content: "✅ **Kích hoạt thành công!** Hãy dùng lệnh `/script` để lấy mã chạy game nha.", ephemeral: true });
     }
@@ -162,21 +169,22 @@ client.on('interactionCreate', async (interaction) => {
         let userKey = interaction.options.getString('key');
         
         if (!userKey) {
-            if (!database.whitelist.includes(userId)) {
+            const isWhitelisted = await WhitelistModel.findById(userId);
+            if (!isWhitelisted) {
                 return interaction.reply({ content: "❌ Ông chưa được Whitelist! Hãy dùng lệnh `/redeem` trước.", ephemeral: true });
             }
-            for (const [k, v] of Object.entries(database.keys)) {
-                if (v.userId === userId) { userKey = k; break; }
-            }
+            const foundKey = await KeyModel.findOne({ userId: userId });
+            if (foundKey) userKey = foundKey._id;
         }
         
-        if (!database.keys[userKey]) return interaction.reply({ content: "❌ Không tìm thấy Key tương ứng với tài khoản!", ephemeral: true });
-        if (new Date() > new Date(database.keys[userKey].expiry)) {
-            delete database.keys[userKey]; saveDatabase();
+        const keyData = await KeyModel.findById(userKey);
+        if (!keyData) return interaction.reply({ content: "❌ Không tìm thấy Key tương ứng với tài khoản!", ephemeral: true });
+        if (new Date() > new Date(keyData.expiry)) {
+            await KeyModel.findByIdAndDelete(userKey);
+            await WhitelistModel.findByIdAndDelete(userId);
             return interaction.reply({ content: "❌ Key liên kết với tài khoản này đã hết hạn!", ephemeral: true });
         }
         
-        // Đoạn script chính của Vexz Hub
         const script = `repeat wait() until game:IsLoaded() and game.Players.LocalPlayer\ngetgenv().Key = "${userKey}"\nloadstring(game:HttpGet("https://raw.githubusercontent.com/phamquochoa1942-png/DevVexzHub/refs/heads/main/VexzHub"))()`;
         
         await interaction.reply({
@@ -189,9 +197,11 @@ client.on('interactionCreate', async (interaction) => {
     if (commandName === 'whitelist') {
         if (userId !== OWNER_ID) return interaction.reply({ content: "❌ Quyền lực từ chối!", ephemeral: true });
         const target = interaction.options.getUser('user');
-        if (database.whitelist.includes(target.id)) return interaction.reply({ content: "⚠️ Người chơi này đã có trong Whitelist rồi!", ephemeral: true });
         
-        database.whitelist.push(target.id); saveDatabase();
+        const isWhitelisted = await WhitelistModel.findById(target.id);
+        if (isWhitelisted) return interaction.reply({ content: "⚠️ Người chơi này đã có trong Whitelist rồi!", ephemeral: true });
+        
+        await WhitelistModel.create({ _id: target.id });
         await interaction.reply({ content: `✅ Đã cấp Whitelist trực tiếp cho thành viên **${target.username}**`, ephemeral: true });
     }
 
@@ -199,27 +209,24 @@ client.on('interactionCreate', async (interaction) => {
     if (commandName === 'unwhitelist') {
         if (userId !== OWNER_ID) return interaction.reply({ content: "❌ Quyền lực từ chối!", ephemeral: true });
         const target = interaction.options.getUser('user');
-        const idx = database.whitelist.indexOf(target.id);
-        if (idx === -1) return interaction.reply({ content: "⚠️ Thành viên này không nằm trong danh sách Whitelist!", ephemeral: true });
         
-        database.whitelist.splice(idx, 1);
-        for (const [k, v] of Object.entries(database.keys)) {
-            if (v.userId === target.id) delete database.keys[k];
-        }
-        saveDatabase();
+        const isWhitelisted = await WhitelistModel.findById(target.id);
+        if (!isWhitelisted) return interaction.reply({ content: "⚠️ Thành viên này không nằm trong danh sách Whitelist!", ephemeral: true });
+        
+        await WhitelistModel.findByIdAndDelete(target.id);
+        await KeyModel.deleteMany({ userId: target.id });
         await interaction.reply({ content: `✅ Đã gỡ Whitelist và hủy bỏ toàn bộ Key của thành viên **${target.username}**`, ephemeral: true });
     }
 
     // ===== /mykey (ẨN DANH) =====
     if (commandName === 'mykey') {
-        if (!database.whitelist.includes(userId)) return interaction.reply({ content: "❌ Ông chưa kích hoạt Whitelist nên không có dữ liệu Key!", ephemeral: true });
-        let found = null;
-        for (const [k, v] of Object.entries(database.keys)) {
-            if (v.userId === userId) { found = { key: k, ...v }; break; }
-        }
+        const isWhitelisted = await WhitelistModel.findById(userId);
+        if (!isWhitelisted) return interaction.reply({ content: "❌ Ông chưa kích hoạt Whitelist nên không có dữ liệu Key!", ephemeral: true });
+        
+        const found = await KeyModel.findOne({ userId: userId });
         if (found) {
             await interaction.reply({
-                content: `🔑 **Thông tin Key của ông:**\n• Mã Key: \`${found.key}\`\n• Hạn dùng đến: ${new Date(found.expiry).toLocaleDateString("vi-VN")}`,
+                content: `🔑 **Thông tin Key của ông:**\n• Mã Key: \`${found._id}\`\n• Hạn dùng đến: ${new Date(found.expiry).toLocaleDateString("vi-VN")}`,
                 ephemeral: true
             });
         } else {
@@ -230,8 +237,10 @@ client.on('interactionCreate', async (interaction) => {
     // ===== /listkeys (ADMIN ONLY - ẨN DANH) =====
     if (commandName === 'listkeys') {
         if (userId !== OWNER_ID) return interaction.reply({ content: "❌ Quyền lực từ chối!", ephemeral: true });
-        const list = Object.entries(database.keys).slice(0, 25).map(([k, v]) => 
-            `\`${k.slice(0,12)}...\` | Người dùng: ${v.username || 'Chưa dùng'} | Hạn: ${new Date(v.expiry).toLocaleDateString("vi-VN")}`
+        
+        const allKeys = await KeyModel.find().limit(25);
+        const list = allKeys.map(v => 
+            `\`${v._id.slice(0,12)}...\` | Người dùng: ${v.username || 'Chưa dùng'} | Hạn: ${new Date(v.expiry).toLocaleDateString("vi-VN")}`
         ).join('\n') || 'Hệ thống hiện tại chưa có mã Key nào.';
         await interaction.reply({ content: `📜 **Danh sách 25 Key gần nhất:**\n${list}`, ephemeral: true });
     }
@@ -240,13 +249,14 @@ client.on('interactionCreate', async (interaction) => {
     if (commandName === 'deletekey') {
         if (userId !== OWNER_ID) return interaction.reply({ content: "❌ Quyền lực từ chối!", ephemeral: true });
         const key = interaction.options.getString('key');
-        if (!database.keys[key]) return interaction.reply({ content: "❌ Không tìm thấy mã Key này trên hệ thống!", ephemeral: true });
         
-        if (database.keys[key].userId) {
-            const idx = database.whitelist.indexOf(database.keys[key].userId);
-            if (idx !== -1) database.whitelist.splice(idx, 1);
+        const keyData = await KeyModel.findById(key);
+        if (!keyData) return interaction.reply({ content: "❌ Không tìm thấy mã Key này trên hệ thống!", ephemeral: true });
+        
+        if (keyData.userId) {
+            await WhitelistModel.findByIdAndDelete(keyData.userId);
         }
-        delete database.keys[key]; saveDatabase();
+        await KeyModel.findByIdAndDelete(key);
         await interaction.reply({ content: `✅ Đã xóa bỏ hoàn toàn mã Key \`${key}\` ra khỏi hệ thống.`, ephemeral: true });
     }
 });
